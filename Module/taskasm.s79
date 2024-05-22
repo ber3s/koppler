@@ -1,0 +1,138 @@
+/*****************************************************************************/
+/*   Routinen zur Taskkontrolle                                              */
+/*   Version 1.0.1                                                           */
+/*   18.01.2006                                                              */
+/*   Bernd Petzold                                                           */
+/*****************************************************************************/
+/*************************************************************************
+/* IRQ-Handler vom IAR C-Compiler, ist abhängig vom Code
+/*************************************************************************
+		SUB	LR,LR,#4
+                STMDB	SP!,{R0,R1,R2,R3,R12,LR}
+                BL	irq_isr_handler
+                LDMIA	SP!, {R0,R1,R2,R3,R12,PC}^
+*/
+
+		MODULE	?TASK
+
+		PUBLIC	__idle
+                PUBLIC	iidle
+		PUBLIC  __taskreset
+		PUBLIC	__lock
+                PUBLIC	__unlock
+                PUBLIC  __mem1
+                PUBLIC  __sys_stack
+
+                EXTERN	__tasklink
+                EXTERN	__taskswitch
+                EXTERN	__taskflag
+                EXTERN	__taskptr
+//                EXTERN  __mem1
+//                EXTERN  __sys_stack
+		
+		RSEG	DATA_N:DATA(8)
+		CODE32
+//TASKFLAG:	DS8	1
+ //             ALIGNRAM	4
+//TASKTABLE:	DS32	(max_tasks+1)*4
+__mem1:		DS32	200
+__sys_stack:
+		RSEG	CODE:NOROOT:CODE(2)
+		CODE32
+
+                #define	adr	R0		// Adresse des task = Anfangs-Adresse des Stacks
+                #define start	4
+__taskreset:	STMDB	SP!,{R0-R3,LR}		// Alle Register auf den aktuelle Stack schaffen
+                LDR	R1,[adr,#start]		// Startadresse lesen
+		MOV	R2,SP
+		MOV	SP,adr			// Stack des Tasks einsetzen
+		STMDB	SP!,{R1}		// Startadresse und Stack initialisieren
+                STMDB	SP!,{R0-R12,LR}
+ 		MOV	R1,#0
+ 		MRS	R3,CPSR			// CPSR so einstellen wie den Aufrufer
+                STMDB	SP!,{R1,R3}
+                STR	SP,[adr]		// aktuellen Stack abspeichern			
+                MOV	SP,R2			// alten Stack wiederherstellen				
+		LDMIA	SP!,{R0-R3,PC}
+		
+// In LR_usr steht die Rücksprungadresse vom Programm
+// In LR_irq steht die Rücksprungadresse aus dem Interrupt, diese Adresse steht auch auf dem Stack
+__idle:		LDR	R0,=__taskflag		// Taskumschaltung freigegeben ?
+		MOV	R1,#1			// Taskumschaltung sperren
+		SWPB	R1,R1,[R0]
+		STMDB	SP!,{LR}
+		STMDB	SP!,{R0-R12,LR}		// Alle Register auf den aktuelle Stack schaffen
+		MRS	R1,CPSR			// CPSR retten
+                MOV	R0,#0
+                STMDB	SP!,{R0,R1}
+		B	idle2
+
+// !!!! __iidle darf nur die Register R0-R3,R12 verändern
+iidle:        LDR	R0,=__taskflag		// Taskumschaltung sperren, falls weitere Interrupts kommen
+               MOV	R1,#1			
+                SWPB	R1,R1,[R0]
+                CMP	R1,#0
+		BXNE	LR			// normales Interruptende, wenn Taskumschaltung gesperrt
+                LDR	R0,[SP,#5*4]		// Rücksprungadresse abgestimmt auf den IAR-Compiler holen		
+		MSR	CPSR_c, #0x9F		// Systemmode, Interrupt aus
+		STMDB	SP!,{R0}		// Interruptrücksprungadresse auf den Sys-Stack
+                MSR	CPSR_c, #0x92		// IRQ-Mode, Interrupt aus
+		LDMIA	SP!,{R0-R3,R12}		// Interruptstack bereinigen
+		ADD	SP,SP,#4		// LR Register von sys darf nicht überschrieben werden
+                				// Die Rücksprungadresse ist schon auf dem Sys-Stack
+		MSR	CPSR_c, #0x9F		// Systemmode, Interrupt aus
+		STMDB	SP!,{R0-R12,LR}		// Systemregister auf den Stack
+		MSR	CPSR_c, #0x92		// IRQ-Mode, Interrupt aus
+		MRS	R1,SPSR			// CPSR retten
+		MSR	CPSR_c, #0x9F
+		MOV	R0,#1
+		STMDB	SP!,{R0,R1}
+
+idle2:		LDR	R3,=__taskptr		// R3 := Taskpointer
+                LDR	R0,[R3]			// R0 := Aktuelle Taskadresse
+                STR	SP,[R0]			// Stack auf der aktuellen Taskvariablen speichern				
+
+		LDR	SP,=__sys_stack
+		BL	__tasklink		// Rückgabewert ist der Stack des zu startenden Tasks
+		MOV	SP,R0
+
+		LDMIA	SP!,{R0,R1}		// R2=Kennung R3=CPSR/SPSR
+                CMP	R0,#0
+		BEQ	idle3
+                LDR	R0,[SP,#14*4]		// Rücksprungadresse abgestimmt auf den IAR-Compiler holen		
+		MSR	CPSR_c, #0x92
+                MSR	SPSR_cxsf,R1
+                STMDB	SP!,{R0}
+                MSR	CPSR_c, #0x9F
+		LDR	R0,=__taskflag
+                MOV	R1,#0			// Taskumschaltung freigeben
+                STRB	R1,[R0]
+                LDMIA	SP!,{R0-R12,LR}		// Register holen
+                ADD	SP,SP,#4		// Rücksprungadresse löschen
+                MSR	CPSR_c, #0x92
+                LDMIA	SP!,{PC}^
+
+idle3:		MSR	CPSR_cxsf,R1		// Rückkehr, wenn Umschaltung mit idle()
+		LDR	R0,=__taskflag
+                MOV	R1,#0			// Taskumschaltung freigeben
+                STRB	R1,[R0]
+		LDMIA	SP!,{R0-R12,LR,PC}
+
+
+		#define device R0		// Adresse der Semaphore
+                #define return R0
+                #define tmp R1
+__lock:		STMDB	SP!,{tmp,LR}
+                MOV	tmp,#0x1
+                SWPB	return,tmp,[device]
+		LDMIA	SP!,{tmp,PC}
+
+__unlock:	STMDB	SP!,{tmp,LR}
+                MOV	tmp,#0x0
+                SWPB	return,tmp,[device]
+		LDMIA	SP!,{tmp,PC}
+
+		END
+		ENDMOD
+
+
